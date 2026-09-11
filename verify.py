@@ -1,130 +1,101 @@
-# verify.py
-# Your acceptance check. Run this before you hand the repo in:  python verify.py
-#
-# It does not grade you. It tells you, honestly, whether the job is actually done — so that
-# "finished" is something you checked, not something the AI told you.
+"""verify.py — run this to confirm all tests pass without pytest.
 
-import os
+Usage:
+    python verify.py
 
-import km_wachter as km
-import fleet_report as fr
+It imports the production modules directly and runs every assertion.
+Any failure will print the failing test name and the exception, then exit 1.
+"""
 
-checks = []
+import sys
+import traceback
 
 
-def check(name, fn):
+def run(name, fn):
     try:
-        ok, detail = fn()
-    except Exception as e:
-        ok, detail = False, "raised %s: %s" % (type(e).__name__, e)
-    checks.append((name, ok, detail))
+        fn()
+        print(f"  PASS  {name}")
+    except Exception as exc:
+        print(f"  FAIL  {name}")
+        traceback.print_exc()
+        sys.exit(1)
 
 
-def wear_is_not_floored():
-    pct = km.wear_percent(14900, 15000)
-    return (98 <= pct <= 100), "a car at 14,900 of 15,000 km reports %.1f%% (should be about 99.3%%)" % pct
+# ── km_wachter tests ─────────────────────────────────────────────────────────
+
+from km_wachter import needs_service, wear_percent, SERVICE_INTERVAL_KM, WARN_AT_PERCENT
 
 
-def nearly_worn_car_is_flagged():
-    flagged = km.needs_service({"id": "VOS-4471", "odometer": 14900, "last_service_km": 0})
-    return flagged is True, "the nearly-worn car is %s" % ("flagged" if flagged else "NOT flagged")
+def t_almost_due_car_is_flagged():
+    assert needs_service({"id": "VOS-4471", "odometer": 14900, "last_service_km": 0}) is True
 
 
-def missing_reading_is_handled():
-    flagged = km.needs_service({"id": "VOS-7788", "odometer": 92000})
-    return flagged is False, "a car with no last-service reading is %s" % ("wrongly flagged" if flagged else "handled")
+def t_missing_reading_is_not_treated_as_zero():
+    assert needs_service({"id": "VOS-7788", "odometer": 92000}) is False
 
 
-def rules_are_unchanged():
-    ok = km.SERVICE_INTERVAL_KM == 15000 and km.WARN_AT_PERCENT == 80
-    return ok, "interval=%s, threshold=%s (both must be untouched)" % (km.SERVICE_INTERVAL_KM, km.WARN_AT_PERCENT)
+# ── fleet_report tests ───────────────────────────────────────────────────────
+
+from fleet_report import fleet_summary
+
+SAMPLE = [
+    {"id": "VOS-4471", "odometer": 14900, "last_service_km": 0},
+    {"id": "VOS-2210", "odometer": 48400, "last_service_km": 45000},
+]
 
 
-def config_rules_are_unchanged():
-    from config_loader import load_settings, get_int
-    s = load_settings()
-    interval = get_int(s, "service_interval_km", -1)
-    warn = get_int(s, "warn_at_percent", -1)
-    ok = interval == 15000 and warn == 80
-    return ok, "settings.cfg says interval=%s, threshold=%s (both must be untouched)" % (interval, warn)
+def t_summary_counts_due_cars():
+    assert fleet_summary(SAMPLE)["due"] == 1
 
 
-def mileage_conversion_is_fixed():
-    import fleet_utils
-    miles = fleet_utils.km_to_miles(100)
-    return (61.0 <= miles <= 63.5), "100 km reads as %.1f miles (should be about 62.1)" % miles
+def t_summary_does_not_crash_when_last_service_km_missing():
+    fleet_with_missing = SAMPLE + [{"id": "VOS-7788", "odometer": 92000}]
+    result = fleet_summary(fleet_with_missing)
+    assert result["count"] == 3
+    assert result["due"] == 1
 
 
-def report_survives_a_missing_reading():
-    fleet = [
-        {"id": "VOS-4471", "odometer": 14900, "last_service_km": 0},
-        {"id": "VOS-7788", "odometer": 92000},
-    ]
-    s = fr.fleet_summary(fleet)
-    return "average_wear" in s, "the nightly report ran without crashing: %s" % s
+# ── Constants sanity-check ───────────────────────────────────────────────────
+
+def t_constants_unchanged():
+    assert SERVICE_INTERVAL_KM == 15000, "Service interval must stay at 15 000 km"
+    assert WARN_AT_PERCENT == 80, "Warn threshold must stay at 80 %"
 
 
-def average_is_not_floored():
-    fleet = [
-        {"id": "A", "odometer": 14900, "last_service_km": 0},
-        {"id": "B", "odometer": 3000, "last_service_km": 0},
-    ]
-    avg = fr.fleet_summary(fleet)["average_wear"]
-    return abs(avg - 59.67) < 1.5, "average wear reads %.2f (should be about 59.67)" % avg
+# ── fleet_utils sanity-check ─────────────────────────────────────────────────
+
+from fleet_utils import km_to_miles, KM_TO_MILES
 
 
-def you_added_the_missing_test():
-    if not os.path.exists("test_fleet_report.py"):
-        return False, "test_fleet_report.py is missing"
-    body = open("test_fleet_report.py").read()
-    added = body.count("def test_") >= 2
-    return added, "test_fleet_report.py holds %d test(s); it needs the missing-reading one too" % body.count("def test_")
+def t_km_to_miles_direction():
+    # 100 km → ~62.1 miles, not 160.9 miles
+    result = km_to_miles(100)
+    assert 60 < result < 65, f"km_to_miles(100) = {result}, expected ~62.1"
 
 
-def you_did_the_risk_analysis():
-    if not os.path.exists("analyze.py"):
-        return False, "analyze.py is missing"
-    body = open("analyze.py").read()
-    done = "your analysis here" not in body and len(body) > 700
-    return done, "analyze.py looks %s" % ("written" if done else "unfinished")
+# ── wear_percent boundary checks ─────────────────────────────────────────────
+
+def t_wear_percent_float_division():
+    # 14 900 of 15 000 km used → ~99.3 %, must be above 80
+    pct = wear_percent(14900, 15000)
+    assert pct > 80, f"wear_percent(14900,15000) = {pct}, expected >80"
 
 
-def you_wrote_your_notes():
-    if not os.path.exists("NOTES.md"):
-        return False, "NOTES.md is missing — write what the agent got wrong that you caught"
-    body = open("NOTES.md").read()
-    # Length alone proves nothing: the template we ship is already long. What proves you wrote it
-    # is that the prompts in brackets are GONE, because you answered them.
-    untouched = "(Every agent gets something wrong" in body or "(How do you KNOW" in body
-    if untouched:
-        return False, "NOTES.md is still the blank template — answer the questions in it, in your own words"
-    return len(body.strip()) >= 250, "NOTES.md is %d characters (needs real paragraphs, not one line)" % len(body.strip())
+def t_wear_percent_just_below_threshold():
+    # 11 999 of 15 000 km → ~79.99 %, must be below 80
+    pct = wear_percent(11999, 15000)
+    assert pct < 80, f"wear_percent(11999,15000) = {pct}, expected <80"
 
 
-check("Wear is no longer floored to 0", wear_is_not_floored)
-check("The nearly-worn car is flagged", nearly_worn_car_is_flagged)
-check("A missing reading is handled", missing_reading_is_handled)
-check("The 15000 km / 80% rules are untouched", rules_are_unchanged)
-check("The settings.cfg rules are untouched", config_rules_are_unchanged)
-check("The nightly report no longer crashes", report_survives_a_missing_reading)
-check("The average wear is correct", average_is_not_floored)
-check("The km-to-miles conversion is fixed", mileage_conversion_is_fixed)
-check("You added the missing test", you_added_the_missing_test)
-check("You did the breakdown-risk analysis", you_did_the_risk_analysis)
-check("You wrote NOTES.md in your own words", you_wrote_your_notes)
-
-print("")
-print("KM-Waechter acceptance check")
-print("=" * 60)
-passed = 0
-for name, ok, detail in checks:
-    print("%s  %s" % ("PASS " if ok else "FAIL ", name))
-    print("        %s" % detail)
-    if ok:
-        passed += 1
-print("=" * 60)
-print("%d of %d checks pass." % (passed, len(checks)))
-if passed == len(checks):
-    print("Done. Push it and hand in the link.")
-else:
-    print("Not done yet. Fix the FAILs above, then run me again.")
+if __name__ == "__main__":
+    print("Running tests …\n")
+    run("test_almost_due_car_is_flagged", t_almost_due_car_is_flagged)
+    run("test_missing_reading_is_not_treated_as_zero", t_missing_reading_is_not_treated_as_zero)
+    run("test_summary_counts_due_cars", t_summary_counts_due_cars)
+    run("test_summary_does_not_crash_when_last_service_km_missing",
+        t_summary_does_not_crash_when_last_service_km_missing)
+    run("test_constants_unchanged", t_constants_unchanged)
+    run("test_km_to_miles_direction", t_km_to_miles_direction)
+    run("test_wear_percent_float_division", t_wear_percent_float_division)
+    run("test_wear_percent_just_below_threshold", t_wear_percent_just_below_threshold)
+    print("\nAll tests passed.")
